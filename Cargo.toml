@@ -52,7 +52,6 @@ shape-run-cache = []
 std = [
     "fontdb/memmap",
     "fontdb/std",
-    "harfbuzz_rs/std",
     "linebender_resource_handle/std",
     "skrifa/std",
     "swash?/std",
