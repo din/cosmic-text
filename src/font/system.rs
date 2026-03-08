@@ -9,9 +9,9 @@ use core::ops::{Deref, DerefMut};
 use fontdb::{FaceInfo, Query, Style};
 use skrifa::raw::{ReadError, TableProvider as _};
 
-// re-export fontdb and harfrust
+// re-export fontdb and harfbuzz_rs
 pub use fontdb;
-pub use harfrust;
+pub use harfbuzz_rs;
 
 use super::fallback::{Fallback, Fallbacks, MonospaceFallbackInfo, PlatformFallback};
 

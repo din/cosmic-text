@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use harfrust::Shaper;
 use linebender_resource_handle::{Blob, FontData};
-use skrifa::raw::{ReadError, TableProvider as _};
+use skrifa::raw::TableProvider as _;
 use skrifa::{metrics::Metrics, prelude::*};
 // re-export skrifa
 pub use skrifa;
@@ -16,7 +15,6 @@ use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use fontdb::Style;
-use self_cell::self_cell;
 
 pub mod fallback;
 pub use fallback::{Fallback, PlatformFallback};
@@ -24,38 +22,30 @@ pub use fallback::{Fallback, PlatformFallback};
 pub use self::system::*;
 mod system;
 
-struct OwnedFaceData {
-    data: Arc<dyn AsRef<[u8]> + Send + Sync>,
-    shaper_data: harfrust::ShaperData,
-    shaper_instance: harfrust::ShaperInstance,
-    metrics: Metrics,
-}
-
-self_cell!(
-    struct OwnedFace {
-        owner: OwnedFaceData,
-
-        #[covariant]
-        dependent: Shaper,
-    }
-);
-
 struct FontMonospaceFallback {
     monospace_em_width: Option<f32>,
     scripts: Vec<[u8; 4]>,
     unicode_codepoints: Vec<u32>,
 }
 
-/// A font
+/// A font using harfbuzz_rs (C HarfBuzz bindings) for shaping.
 pub struct Font {
     #[cfg(feature = "swash")]
     swash: (u32, swash::CacheKey),
-    harfrust: OwnedFace,
+    /// The harfbuzz_rs Font, created from font data with 'static lifetime.
+    /// SAFETY: _hb_data keeps the backing bytes alive for the lifetime of this struct.
+    hb_font: harfbuzz_rs::Owned<harfbuzz_rs::Font<'static>>,
+    _hb_data: Arc<dyn AsRef<[u8]> + Send + Sync>,
     data: FontData,
     id: fontdb::ID,
+    metrics: Metrics,
     monospace_fallback: Option<FontMonospaceFallback>,
     pub(crate) italic_or_oblique: bool,
 }
+
+// SAFETY: harfbuzz_rs types are backed by ref-counted C objects that are thread-safe.
+unsafe impl Send for Font {}
+unsafe impl Sync for Font {}
 
 impl fmt::Debug for Font {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -90,16 +80,13 @@ impl Font {
         self.data.data.data()
     }
 
-    pub fn shaper(&self) -> &harfrust::Shaper<'_> {
-        self.harfrust.borrow_dependent()
-    }
-
-    pub(crate) fn shaper_instance(&self) -> &harfrust::ShaperInstance {
-        &self.harfrust.borrow_owner().shaper_instance
+    /// Get a reference to the harfbuzz_rs Font for shaping.
+    pub fn hb_font(&self) -> &harfbuzz_rs::Font<'static> {
+        &self.hb_font
     }
 
     pub fn metrics(&self) -> &Metrics {
-        &self.harfrust.borrow_owner().metrics
+        &self.metrics
     }
 
     #[cfg(feature = "peniko")]
@@ -133,10 +120,7 @@ impl Font {
             fontdb::Source::SharedFile(_path, data) => Arc::clone(data),
         };
 
-        // It's a bit unfortunate but we need to parse the data into a `FontRef`
-        // twice--once to construct the HarfRust `ShaperInstance` and
-        // `ShaperData`, and once to create the persistent `FontRef` tied to the
-        // lifetime of the face data.
+        // Use skrifa for metrics (unchanged)
         let font_ref = FontRef::from_index((*data).as_ref(), info.index).ok()?;
         let location = font_ref
             .axes()
@@ -197,12 +181,16 @@ impl Font {
             None
         };
 
-        let (shaper_instance, shaper_data) = {
-            (
-                harfrust::ShaperInstance::from_coords(&font_ref, location.coords().iter().copied()),
-                harfrust::ShaperData::new(&font_ref),
-            )
-        };
+        // Create harfbuzz_rs Face and Font.
+        // SAFETY: We extend the byte slice lifetime to 'static. This is sound
+        // because `_hb_data` (the Arc) is stored alongside hb_font and keeps
+        // the data alive for as long as the Font struct exists.
+        let bytes: &[u8] = (*data).as_ref();
+        let bytes_static: &'static [u8] = unsafe { core::mem::transmute(bytes) };
+
+        let face = harfbuzz_rs::Face::from_bytes(bytes_static, info.index);
+        let mut hb_font = harfbuzz_rs::Font::new(face);
+        hb_font.set_variations(&[harfbuzz_rs::Variation::new(b"wght", weight.0 as f32)]);
 
         Some(Self {
             id: info.id,
@@ -212,28 +200,9 @@ impl Font {
                 let swash = swash::FontRef::from_index((*data).as_ref(), info.index as usize)?;
                 (swash.offset, swash.key)
             },
-            harfrust: OwnedFace::try_new(
-                OwnedFaceData {
-                    data: Arc::clone(&data),
-                    shaper_data,
-                    shaper_instance,
-                    metrics,
-                },
-                |OwnedFaceData {
-                     data,
-                     shaper_data,
-                     shaper_instance,
-                     ..
-                 }| {
-                    let font_ref = FontRef::from_index((**data).as_ref(), info.index)?;
-                    let shaper = shaper_data
-                        .shaper(&font_ref)
-                        .instance(Some(shaper_instance))
-                        .build();
-                    Ok::<_, ReadError>(shaper)
-                },
-            )
-            .ok()?,
+            hb_font,
+            _hb_data: Arc::clone(&data),
+            metrics,
             data: FontData::new(Blob::new(data), info.index),
             italic_or_oblique: info.style == Style::Italic || info.style == Style::Oblique,
         })
@@ -258,4 +227,5 @@ mod test {
         #[cfg(not(target_arch = "wasm32"))]
         println!("Fonts load time {}ms.", now.elapsed().as_millis());
     }
+
 }
