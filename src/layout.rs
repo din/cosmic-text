@@ -81,7 +81,7 @@ impl LayoutGlyph {
             self.font_size * scale,
             (
                 (self.x + x_offset).mul_add(scale, offset.0),
-                math::truncf((self.y - y_offset).mul_add(scale, offset.1)), // Hinting in Y axis
+                ((self.y - y_offset).mul_add(scale, offset.1) + 0.5).floor(), // Round Y to match Chrome/Skia pixel grid
             ),
             self.font_weight,
             self.cache_key_flags,
